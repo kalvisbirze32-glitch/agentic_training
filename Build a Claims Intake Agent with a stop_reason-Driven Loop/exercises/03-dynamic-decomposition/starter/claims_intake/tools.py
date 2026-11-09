@@ -103,20 +103,81 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["severity", "rationale"],
         },
     },
-    # TODO: Add three more tool schemas to this list.
-    #
-    #   - request_clarification(question: str, ambiguity_between: list of >=2 CLAIM_TYPES)
-    #     Ask the claimant ONE clarifying question. Returns the scripted claimant reply,
-    #     or the literal string "NO_RESPONSE" if nothing matches.
-    #
-    #   - route_to_adjuster(queue: enum CLAIM_TYPES, claim_summary: str)
-    #     TERMINAL TOOL. The agent picks this when classification confidence is >= 0.6
-    #     and severity has been assessed.
-    #
-    #   - escalate_to_human(reason: str, structured_summary: dict)
-    #     TERMINAL TOOL. The agent picks this when the claim cannot be routed safely.
-    #     structured_summary requires: policy_id, root_cause, candidate_claim_types,
-    #     case_facts, recommended_action, confidence.
+    {
+        "name": "request_clarification",
+        "description": (
+            "Ask the claimant ONE focused clarifying question when the claim type is genuinely "
+            "ambiguous. Name the competing claim types in ambiguity_between. Returns the claimant's "
+            "reply, or the literal string NO_RESPONSE if they cannot answer; do not re-ask after "
+            "NO_RESPONSE."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "A single focused question for the claimant"},
+                "ambiguity_between": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": CLAIM_TYPES},
+                    "minItems": 2,
+                    "description": "The claim types this question is meant to disambiguate",
+                },
+            },
+            "required": ["question", "ambiguity_between"],
+        },
+    },
+    {
+        "name": "route_to_adjuster",
+        "description": (
+            "TERMINAL TOOL. Route the claim to the adjuster queue for its claim type. Call this only "
+            "after classify_claim (confidence >= 0.6) and assess_severity have been called. Exactly one "
+            "terminal tool (this or escalate_to_human) may be called per claim."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "queue": {"type": "string", "enum": CLAIM_TYPES},
+                "claim_summary": {"type": "string", "description": "Two-sentence summary for the adjuster"},
+            },
+            "required": ["queue", "claim_summary"],
+        },
+    },
+    {
+        "name": "escalate_to_human",
+        "description": (
+            "TERMINAL TOOL. Hand the claim to a human reviewer when it cannot be routed safely: "
+            "classification confidence below 0.6, unresolved ambiguity, or a NO_RESPONSE to a needed "
+            "clarification. Exactly one terminal tool (this or route_to_adjuster) may be called per claim."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "description": "Short reason code or sentence for escalating"},
+                "structured_summary": {
+                    "type": "object",
+                    "properties": {
+                        "policy_id": {"type": "string"},
+                        "root_cause": {"type": "string"},
+                        "candidate_claim_types": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": CLAIM_TYPES},
+                        },
+                        "case_facts": {"type": "object"},
+                        "recommended_action": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    },
+                    "required": [
+                        "policy_id",
+                        "root_cause",
+                        "candidate_claim_types",
+                        "case_facts",
+                        "recommended_action",
+                        "confidence",
+                    ],
+                },
+            },
+            "required": ["reason", "structured_summary"],
+        },
+    },
 ]
 
 # ----------------------------------------------------------------------------
@@ -193,42 +254,80 @@ def _t_assess_severity(session: ClaimSession, inp: dict[str, Any]) -> str:
 
 
 def _t_request_clarification(session: ClaimSession, inp: dict[str, Any]) -> str:
-    # TODO: Implement the clarification dispatcher.
-    #   1. Validate inp["question"] is a string and inp["ambiguity_between"] is a list of
-    #      at least 2 entries; otherwise return _err("permanent", False, ...).
-    #   2. Record the asked clarification in session.clarifications_asked (so the runner
-    #      can count it).
-    #   3. Substring-match the question (case-insensitive) against the keys in
-    #      session.clarification_responses; if any key appears in the question, return
-    #      _ok({"claimant_reply": <the matching reply>}).
-    #   4. Otherwise return _ok({"claimant_reply": "NO_RESPONSE"}).
-    return _err("permanent", False, "TODO: _t_request_clarification not implemented yet")
+    question = inp.get("question")
+    candidates = inp.get("ambiguity_between")
+    if not isinstance(question, str) or not question.strip():
+        return _err("permanent", False, "question must be a non-empty string")
+    if not isinstance(candidates, list) or len(candidates) < 2:
+        return _err("permanent", False, "ambiguity_between must be a list of at least 2 claim types")
+    session.clarifications_asked.append({"question": question, "ambiguity_between": candidates})
+    lowered = question.lower()
+    for key, reply in session.clarification_responses.items():
+        if key.lower() in lowered:
+            return _ok({"claimant_reply": reply})
+    return _ok({"claimant_reply": "NO_RESPONSE"})
 
 
 def _t_route_to_adjuster(session: ClaimSession, inp: dict[str, Any]) -> str:
-    # TODO: Implement the routing terminal tool.
-    #   1. Guard against double-terminal: if session.terminal_called, return an error.
-    #   2. Validate inp["queue"] is in CLAIM_TYPES and inp["claim_summary"] is a string.
-    #   3. Require session.classification and session.severity to be set; otherwise error.
-    #   4. Build the routing record (claim_id, policy_id, claim_type, severity, confidence,
-    #      rationale, claim_summary, case_facts) and assign it to session.routing.
-    #   5. Append the record to runs/<run>/queues/<queue>.jsonl via _append_jsonl.
-    #   6. Return _ok({"routed": True, "queue": queue}).
-    return _err("permanent", False, "TODO: _t_route_to_adjuster not implemented yet")
+    if session.terminal_called:
+        return _err("permanent", False, "a terminal tool was already called for this claim")
+    queue = inp.get("queue")
+    summary = inp.get("claim_summary")
+    if queue not in CLAIM_TYPES:
+        return _err("permanent", False, f"queue must be one of {CLAIM_TYPES}")
+    if not isinstance(summary, str):
+        return _err("permanent", False, "claim_summary must be a string")
+    if session.classification is None:
+        return _err("permanent", False, "classify_claim must be called before route_to_adjuster")
+    if session.severity is None:
+        return _err("permanent", False, "assess_severity must be called before route_to_adjuster")
+    record = {
+        "claim_id": session.claim_id,
+        "policy_id": session.policy_id,
+        "claim_type": session.classification["claim_type"],
+        "severity": session.severity["severity"],
+        "confidence": session.classification["confidence"],
+        "rationale": session.classification["rationale"],
+        "claim_summary": summary,
+        "case_facts": dict(session.case_facts),
+    }
+    session.routing = record
+    _append_jsonl(session.run_dir / "queues" / f"{queue}.jsonl", record)
+    return _ok({"routed": True, "queue": queue})
+
+
+_ESCALATION_REQUIRED_KEYS = [
+    "policy_id",
+    "root_cause",
+    "candidate_claim_types",
+    "case_facts",
+    "recommended_action",
+    "confidence",
+]
 
 
 def _t_escalate_to_human(session: ClaimSession, inp: dict[str, Any]) -> str:
-    # TODO: Implement the escalation terminal tool.
-    #   1. Guard against double-terminal: if session.terminal_called, return an error.
-    #   2. Validate inp["reason"] is a string and inp["structured_summary"] is a dict
-    #      containing all required keys: policy_id, root_cause, candidate_claim_types,
-    #      case_facts, recommended_action, confidence. Return an error listing any missing
-    #      fields by name.
-    #   3. Build the escalation record (claim_id, policy_id, reason, **structured_summary,
-    #      case_facts_at_escalation) and assign it to session.escalation.
-    #   4. Append it to runs/<run>/escalations.jsonl via _append_jsonl.
-    #   5. Return _ok({"escalated": True}).
-    return _err("permanent", False, "TODO: _t_escalate_to_human not implemented yet")
+    if session.terminal_called:
+        return _err("permanent", False, "a terminal tool was already called for this claim")
+    reason = inp.get("reason")
+    summary = inp.get("structured_summary")
+    if not isinstance(reason, str):
+        return _err("permanent", False, "reason must be a string")
+    if not isinstance(summary, dict):
+        return _err("permanent", False, "structured_summary must be an object")
+    missing = [k for k in _ESCALATION_REQUIRED_KEYS if k not in summary]
+    if missing:
+        return _err("permanent", False, f"structured_summary missing required fields: {missing}")
+    record = {
+        "claim_id": session.claim_id,
+        "policy_id": session.policy_id,
+        "reason": reason,
+        **summary,
+        "case_facts_at_escalation": dict(session.case_facts),
+    }
+    session.escalation = record
+    _append_jsonl(session.run_dir / "escalations.jsonl", record)
+    return _ok({"escalated": True})
 
 
 # ----------------------------------------------------------------------------

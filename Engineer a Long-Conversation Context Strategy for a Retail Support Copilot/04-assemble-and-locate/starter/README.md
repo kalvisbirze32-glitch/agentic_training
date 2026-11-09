@@ -13,34 +13,49 @@ The defining architectural choice is **application-side context engineering**: t
 
 ## Context-window anatomy
 
-<!-- TODO (Exercise 4): Replace this section with the five-layer context-window
-     anatomy diagram (system prompt → CLAUDE.md → memory → conversation history
-     → current turn) AND a one-paragraph note locating *this project's* work on
-     one specific layer. The diagram can be ASCII or Mermaid — the point is
-     that a reviewer can read a labeled box and find the corresponding section
-     of `runs/<id>/context.md`. -->
+Each request to Claude is built from five layers. The layout below shows them in the order the model reads them, and which part of `runs/<id>/context.md` each one corresponds to.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 1. System prompt        role, tone, tool rules               │  not produced here
+├──────────────────────────────────────────────────────────────┤
+│ 2. CLAUDE.md            project-level standing instructions  │  not produced here
+├──────────────────────────────────────────────────────────────┤
+│ 3. Memory               facts carried across sessions        │  not produced here
+├──────────────────────────────────────────────────────────────┤
+│ 4. Conversation history  <-- THIS PROJECT                    │
+│    ┌────────────────────────────────────────────────────┐    │
+│    │ # Case Facts                       top boundary    │    │  12-field scratchpad
+│    │ # Resolved: Refund inquiry         middle          │    │  summary of turns 1-14
+│    │ # Resolved: Subscription cancel…   middle          │    │  summary of turns 15-28
+│    │ # Active issue: Payment-method…    bottom boundary │    │  turns 29-48, verbatim
+│    └────────────────────────────────────────────────────┘    │
+├──────────────────────────────────────────────────────────────┤
+│ 5. Current turn         the customer's newest message        │  appended after context.md
+└──────────────────────────────────────────────────────────────┘
+```
+
+This project works entirely on the conversation-history layer: Layer 2 of the course's context-window anatomy, the fourth box above. It never touches the system prompt, `CLAUDE.md` or memory. It takes the raw 48-turn transcript and rebuilds it as the four headed sections shown inside the layer-4 box, which are exactly the four `#` headings in `context.md`. The new customer message (layer 5) is the last thing the model sees, directly below the active-issue section.
 
 ## Why this layout?
 
-<!-- TODO (Exercise 4): Replace this section with 3-5 sentences naming WHY
-     case facts sit at the top, resolved summaries sit in the middle, and the
-     active segment sits verbatim at the bottom. Cite at minimum:
-       (a) the "lost in the middle" attention effect,
-       (b) the resolved-vs-active fidelity tradeoff, and
-       (c) the pass-complete-history baseline this project deliberately deviates
-           from (only for resolved threads, where coherence is no longer load-
-           bearing). The "scratchpad" synonym for the case-facts block is worth
-           naming. -->
+Models attend most reliably to the start and end of a long context and least to the middle (the "lost in the middle" effect), so the densest, most-queried material goes at the two edges. The structured case-facts block (a scratchpad of IDs, amounts and status tokens) sits at the top, and the still-open payment-update thread sits verbatim at the bottom right beside the new user turn. The two finished threads go in the middle as compressed summaries, because they matter less to the next reply and can lose wording without harm. The fidelity trade-off is deliberate: a resolved thread only needs its outcome and key values, while an active thread needs every turn, since a paraphrase could drop something like the new card's last four digits. The baseline this deviates from is passing the complete history unchanged, which keeps everything but spends tokens on settled threads and buries key facts. This project drops that baseline only for the resolved threads, where coherence is no longer load-bearing.
 
 ## Before / after token budget
 
-<!-- TODO (Exercise 4): Replace this section with a one-line statement of the
-     token-counting methodology actually used (sourced from `tokens.methodology()`
-     and recorded in `budget.json`), followed by a Markdown table populated from
-     `runs/<id>/budget.json` showing per-section + assembled total + baseline +
-     reduction-percentage. The table is *sourced from* `budget.json`, not
-     narrated — anyone re-running the pipeline should regenerate the same table
-     (modulo a few percent of drift if the Anthropic endpoint is used). -->
+Token counts use the `len(text) / 3.8 heuristic (no API key available)` method, as returned by `tokens.methodology()` and recorded in `budget.json`; with `ANTHROPIC_API_KEY` set the `messages.count_tokens` endpoint is used instead and figures can drift by a few percent.
+
+| Section | Tokens |
+|---|--:|
+| Baseline (full 48-turn transcript) | 47,144 |
+| `case_facts` | _from `budget.json`_ |
+| `resolved_refund` (turns 1-14, raw 13,921) | _from `budget.json`_ |
+| `resolved_subscription` (turns 15-28, raw 13,693) | _from `budget.json`_ |
+| `active` (turns 29-48, verbatim) | 19,538 |
+| **Assembled total** | _from `budget.json`_ |
+| **Reduction vs. baseline** | _from `budget.json`_ |
+
+The baseline and `active` rows were measured offline from the transcript. The other rows depend on the live extraction and summarization calls, so fill them in from `runs/<id>/budget.json` after `python -m retail_context.run --all` (`per_section_tokens`, `assembled_tokens`, `reduction_pct`).
 
 ## Eval results
 

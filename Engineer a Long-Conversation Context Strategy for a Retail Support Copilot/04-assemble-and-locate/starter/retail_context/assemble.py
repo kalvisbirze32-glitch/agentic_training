@@ -19,15 +19,13 @@ from retail_context.case_facts import CaseFacts
 from retail_context.compressor import Compressed
 from retail_context.tokens import count
 
-# TODO: Define the exact-text header contract.
-# RESOLVED_TITLES maps `issue_id` ("refund", "subscription") to the literal
-# Markdown header string that must appear above that section in the assembled
-# context. ACTIVE_TITLES does the same for the active segment.
-# The AST audit (test_antipatterns.py) regex-matches against these exact strings,
-# so they are part of the contract — change them and the
-# audit fails. Use level-1 headings (# ...), not ##.
-RESOLVED_TITLES: dict[str, str] = {}
-ACTIVE_TITLES: dict[str, str] = {}
+RESOLVED_TITLES: dict[str, str] = {
+    "refund": "# Resolved: Refund inquiry",
+    "subscription": "# Resolved: Subscription cancellation",
+}
+ACTIVE_TITLES: dict[str, str] = {
+    "payment_update": "# Active issue: Payment-method update",
+}
 
 
 @dataclass
@@ -49,32 +47,33 @@ class AssembledContext:
         return count(self.markdown)
 
 
+_RESOLVED_ORDER = ("refund", "subscription")
+
+
 def build(case_facts: CaseFacts, compressed: Compressed) -> AssembledContext:
-    # TODO: Implement the top → middle → bottom assembly.
-    #
-    # 1. Top boundary — the case-facts block.
-    #    Render `case_facts.to_markdown()` and ensure it ends with exactly one
-    #    trailing newline.
-    #
-    # 2. Middle — the resolved-section blocks, in declaration order.
-    #    For each issue_id in ("refund", "subscription"):
-    #      - confirm `compressed.summaries` contains that issue_id; if not,
-    #        raise KeyError naming the missing issue.
-    #      - render the block as f"{RESOLVED_TITLES[issue_id]}\n\n{summary_text}\n"
-    #        where summary_text is the stripped `.text` of the Summary.
-    #    Order matters — refund before subscription — because the regex
-    #    audits the exact section sequence.
-    #
-    # 3. Bottom boundary — the active block (byte-exact).
-    #    Look up the active title in ACTIVE_TITLES by compressed.active_issue_id;
-    #    if missing, fall back to f"# Active issue: {compressed.active_issue_id}".
-    #    The body is `compressed.active_text` unchanged (this is the byte-exact
-    #    contract — do not strip, re-render, or normalize).
-    #
-    # 4. Concatenate top + blank line + refund block + blank line + subscription
-    #    block + blank line + active block into the final `markdown` string.
-    #
-    # 5. Return an AssembledContext with all five fields populated. The
-    #    `active_raw_text` field is `compressed.active_text` — the AST audit uses
-    #    it to verify the assembled `active_block` body equals the raw turns.
-    raise NotImplementedError("Exercise 4: implement position-aware assembly")
+    # Top boundary: structured case facts, normalised to one trailing newline.
+    facts_block = case_facts.to_markdown().rstrip("\n") + "\n"
+
+    # Middle: resolved summaries in the fixed refund -> subscription order.
+    resolved_blocks: dict[str, str] = {}
+    for issue_id in _RESOLVED_ORDER:
+        summary = compressed.summaries.get(issue_id)
+        if summary is None:
+            raise KeyError(f"compressed context has no summary for resolved issue '{issue_id}'")
+        resolved_blocks[issue_id] = f"{RESOLVED_TITLES[issue_id]}\n\n{summary.text.strip()}\n"
+
+    # Bottom boundary: the active text goes in untouched (no strip / re-render).
+    active_title = ACTIVE_TITLES.get(
+        compressed.active_issue_id, f"# Active issue: {compressed.active_issue_id}"
+    )
+    active_block = f"{active_title}\n\n{compressed.active_text}\n"
+
+    markdown = "\n".join([facts_block, *resolved_blocks.values(), active_block])
+
+    return AssembledContext(
+        markdown=markdown,
+        case_facts_block=facts_block,
+        resolved_blocks=resolved_blocks,
+        active_block=active_block,
+        active_raw_text=compressed.active_text,
+    )
